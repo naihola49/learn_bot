@@ -1,0 +1,26 @@
+# New York Times
+https://rss.nytimes.com/services/xml/rss/nyt/Politics.xml
+https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml
+https://rss.nytimes.com/services/xml/rss/nyt/Economy.xml
+
+
+# Medium
+https://medium.com/tag/large-language-models/recommended
+https://medium.com/tag/machine-learning/recommended
+https://medium.com/tag/deep-learning
+https://medium.com/tag/venture-capital/recommended
+
+# Medium Users
+https://medium.com/@profgalloway
+
+
+# Substack Newsletters
+https://matthewbernard776320.substack.com/
+https://www.construction-physics.com/
+https://www.notboring.co/
+
+# test generative code
+https://www.nbcnews.com/politics
+
+
+
