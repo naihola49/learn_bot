@@ -19,6 +19,7 @@ _SCRAPE_ROOT = Path(__file__).resolve().parent
 if str(_SCRAPE_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRAPE_ROOT))
 
+from dedupe import dedupe_rows, load_seen_keys  # noqa: E402
 from agent.sandbox_scraper import (  # noqa: E402
     normalize_generated_code,
     run_generated_parser_in_e2b,
@@ -452,7 +453,14 @@ def main() -> None:
         "--max-repair-attempts",
         type=int,
         default=2,
-        help="Max codegen→sandbox→validate attempts per unknown source (default: 1 = initial only; use 2+ to allow repairs).",
+        help="Max codegen→sandbox→validate attempts per unknown source (default: 2 = initial + one repair).",
+    )
+    parser.add_argument(
+        "--dedupe-window-days",
+        type=int,
+        default=5,
+        help="Before writing today's JSONL, drop rows whose guid/url matches prior days "
+        "(default: 5 calendar days before run date; 0 disables).",
     )
     parser.add_argument(
         "--debug-scrape",
@@ -495,7 +503,8 @@ def main() -> None:
     deterministic_dir = module_dir / "deterministic"
 
     run_date = datetime.now().strftime("%Y-%m-%d")
-    out_path = module_dir.parent / "raw" / "links" / f"{run_date}.jsonl"
+    links_dir = module_dir.parent / "raw" / "links"
+    out_path = links_dir / f"{run_date}.jsonl"
     rows: list[dict[str, Any]] = []
 
     _vlog(args.verbose, f"host Python: {sys.executable}")
@@ -660,6 +669,16 @@ def main() -> None:
                 rows.append(normalize_row(source, entry, "e2b_sandbox"))
         except Exception as exc:
             rows.append(failure_row(source, "agent_parser", str(exc)))
+
+    if args.dedupe_window_days > 0:
+        prior = load_seen_keys(links_dir, run_date, args.dedupe_window_days)
+        before = len(rows)
+        rows, dropped = dedupe_rows(rows, prior)
+        _vlog(
+            args.verbose,
+            f"dedupe: {dropped} row(s) dropped (matched guid/url in prior "
+            f"{args.dedupe_window_days} day(s)); {before} → {len(rows)}",
+        )
 
     write_jsonl(rows, out_path)
     print(f"Wrote {len(rows)} rows to {out_path}")
