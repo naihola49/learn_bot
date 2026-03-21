@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>scrape_links — codegen demo</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --text: #e7ecf3;
+      --muted: #8b98a5;
+      --accent: #6cb6ff;
+      --border: #2d3a4d;
+      --ok: #7fd99a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      min-height: 100vh;
+      line-height: 1.5;
+    }
+    header {
+      padding: 1rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }
+    header h1 { margin: 0; font-size: 1.15rem; font-weight: 600; }
+    header p { margin: 0.35rem 0 0; font-size: 0.85rem; color: var(--muted); max-width: 72ch; }
+    main { padding: 1rem 1.5rem 2rem; display: grid; gap: 1rem; max-width: 1400px; }
+    .row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-end; }
+    label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    select, button {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.45rem 0.65rem;
+      font-size: 0.9rem;
+      min-width: 12rem;
+    }
+    button { cursor: pointer; min-width: auto; }
+    button:hover { border-color: var(--accent); }
+    .panels {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+    @media (max-width: 900px) { .panels { grid-template-columns: 1fr; } }
+    .panel {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      min-height: 320px;
+    }
+    .panel h2 {
+      margin: 0;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--muted);
+      background: #131b26;
+      border-bottom: 1px solid var(--border);
+    }
+    pre {
+      margin: 0;
+      padding: 0.75rem;
+      flex: 1;
+      overflow: auto;
+      font-size: 0.78rem;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .err { color: #ff8b8b; padding: 1rem; }
+    .tabs { display: flex; gap: 0.25rem; margin-top: 0.5rem; }
+    .tabs button { opacity: 0.7; }
+    .tabs button.active { opacity: 1; border-color: var(--accent); }
+    #sandboxPanel { margin-top: 0.5rem; }
+    #linksPreview { font-size: 0.8rem; max-height: 240px; overflow: auto; }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>scrape_links demo — generated parsers & repair trace</h1>
+    <p id="metaNote">Loading…</p>
+  </header>
+  <main>
+    <div class="row">
+      <label>Codegen date
+        <select id="dateSel"></select>
+      </label>
+      <label>Source (host slug)
+        <select id="sourceSel" disabled></select>
+      </label>
+      <label>Attempt
+        <select id="attemptSel" disabled></select>
+      </label>
+      <button type="button" id="refreshBtn">Refresh lists</button>
+    </div>
+    <div class="panels">
+      <div class="panel">
+        <h2>Generated parser (<code>attempt-NN-parser.py</code>)</h2>
+        <pre id="parserOut">Select a date, source, and attempt.</pre>
+      </div>
+      <div class="panel">
+        <h2>Repair context / feedback (<code>attempt-NN-feedback.txt</code>)</h2>
+        <pre id="feedbackOut">—</pre>
+      </div>
+    </div>
+    <div>
+      <div class="tabs">
+        <button type="button" class="active" data-tab="sandbox">E2B sandbox files</button>
+        <button type="button" data-tab="links">Links JSONL (same date)</button>
+      </div>
+      <div id="sandboxPanel">
+        <label style="margin-top:0.5rem">Sandbox file <span style="text-transform:none;color:var(--muted)">(requires <code>--debug-scrape</code>)</span>
+          <select id="sandboxFileSel" disabled></select>
+        </label>
+        <div class="panel" id="sandboxPanelBox" style="margin-top:0.5rem;min-height:180px;">
+          <h2 id="sandboxTitle">Sandbox file contents</h2>
+          <pre id="sandboxOut">—</pre>
+        </div>
+      </div>
+      <div id="linksPanel" style="display:none">
+        <p style="color:var(--muted);font-size:0.85rem">Rows from <code>raw/links/&lt;date&gt;.jsonl</code> (local only; may be gitignored).</p>
+        <pre id="linksPreview">—</pre>
+      </div>
+    </div>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    async function jget(url) {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(await r.text());
+      return r.json();
+    }
+
+    async function loadMeta() {
+      const m = await jget("/api/meta");
+      $("metaNote").textContent = m.note;
+    }
+
+    async function loadDates() {
+      const dates = await jget("/api/codegen/dates");
+      const sel = $("dateSel");
+      sel.innerHTML = "";
+      if (!dates.length) {
+        sel.innerHTML = "<option value=\"\">(no codegen yet — run with -v)</option>";
+        return;
+      }
+      for (const d of dates) {
+        const o = document.createElement("option");
+        o.value = d; o.textContent = d;
+        sel.appendChild(o);
+      }
+    }
+
+    async function loadSources(date) {
+      const sel = $("sourceSel");
+      sel.innerHTML = "";
+      if (!date) { sel.disabled = true; return; }
+      const sources = await jget("/api/codegen/" + encodeURIComponent(date) + "/sources");
+      for (const s of sources) {
+        const o = document.createElement("option");
+        o.value = s; o.textContent = s;
+        sel.appendChild(o);
+      }
+      sel.disabled = sources.length === 0;
+    }
+
+    async function loadAttempts(date, slug) {
+      const sel = $("attemptSel");
+      sel.innerHTML = "";
+      if (!date || !slug) { sel.disabled = true; return; }
+      const data = await jget(
+        "/api/codegen/" + encodeURIComponent(date) + "/" + encodeURIComponent(slug) + "/attempts"
+      );
+      for (const a of data.attempts) {
+        const o = document.createElement("option");
+        o.value = String(a.index);
+        o.textContent = "attempt-" + String(a.index).padStart(2, "0") + " (" + a.parser_bytes + " B)";
+        sel.appendChild(o);
+      }
+      sel.disabled = data.attempts.length === 0;
+    }
+
+    async function loadCodegenFiles() {
+      const date = $("dateSel").value;
+      const slug = $("sourceSel").value;
+      const attempt = parseInt($("attemptSel").value, 10);
+      if (!date || !slug || Number.isNaN(attempt)) {
+        $("parserOut").textContent = "—";
+        $("feedbackOut").textContent = "—";
+        return;
+      }
+      try {
+        const p = await jget(
+          "/api/codegen/" + encodeURIComponent(date) + "/" + encodeURIComponent(slug) +
+          "/attempt/" + attempt + "/parser"
+        );
+        $("parserOut").textContent = p.content;
+        const f = await jget(
+          "/api/codegen/" + encodeURIComponent(date) + "/" + encodeURIComponent(slug) +
+          "/attempt/" + attempt + "/feedback"
+        );
+        $("feedbackOut").textContent = f.content;
+      } catch (e) {
+        $("parserOut").textContent = String(e);
+        $("feedbackOut").textContent = "";
+      }
+    }
+
+    async function loadSandboxList() {
+      const date = $("dateSel").value;
+      const slug = $("sourceSel").value;
+      const sel = $("sandboxFileSel");
+      sel.innerHTML = "";
+      if (!date || !slug) { sel.disabled = true; return; }
+      try {
+        const data = await jget(
+          "/api/sandbox/" + encodeURIComponent(date) + "/" + encodeURIComponent(slug) + "/files"
+        );
+        for (const name of data.files) {
+          const o = document.createElement("option");
+          o.value = name; o.textContent = name;
+          sel.appendChild(o);
+        }
+        sel.disabled = data.files.length === 0;
+        if (data.files.length) await loadSandboxFile();
+        else {
+          $("sandboxOut").textContent = "No E2B debug files for this source/date.";
+        }
+      } catch {
+        sel.disabled = true;
+        $("sandboxOut").textContent = "No sandbox debug folder (run scrape with --debug-scrape).";
+      }
+    }
+
+    async function loadSandboxFile() {
+      const date = $("dateSel").value;
+      const slug = $("sourceSel").value;
+      const filename = $("sandboxFileSel").value;
+      if (!filename) return;
+      const data = await jget(
+        "/api/sandbox/" + encodeURIComponent(date) + "/" + encodeURIComponent(slug) +
+        "/file/" + encodeURIComponent(filename)
+      );
+      $("sandboxOut").textContent = data.content;
+      $("sandboxTitle").textContent = filename;
+    }
+
+    async function loadLinks() {
+      const date = $("dateSel").value;
+      if (!date) return;
+      try {
+        const data = await jget("/api/links/" + encodeURIComponent(date));
+        $("linksPreview").textContent = JSON.stringify(data.rows, null, 2);
+      } catch {
+        $("linksPreview").textContent = "No links file for this date (or not on disk).";
+      }
+    }
+
+    document.querySelectorAll(".tabs button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".tabs button").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        const tab = btn.dataset.tab;
+        $("sandboxPanel").style.display = tab === "sandbox" ? "block" : "none";
+        $("linksPanel").style.display = tab === "links" ? "block" : "none";
+        if (tab === "links") loadLinks();
+      });
+    });
+
+    $("refreshBtn").addEventListener("click", async () => {
+      await loadDates();
+      const d = $("dateSel").value;
+      await loadSources(d);
+      const s = $("sourceSel").value;
+      await loadAttempts(d, s);
+      await loadCodegenFiles();
+      await loadSandboxList();
+    });
+
+    $("dateSel").addEventListener("change", async () => {
+      const d = $("dateSel").value;
+      await loadSources(d);
+      const s = $("sourceSel").value;
+      await loadAttempts(d, s);
+      await loadCodegenFiles();
+      await loadSandboxList();
+    });
+
+    $("sourceSel").addEventListener("change", async () => {
+      const d = $("dateSel").value;
+      const s = $("sourceSel").value;
+      await loadAttempts(d, s);
+      await loadCodegenFiles();
+      await loadSandboxList();
+    });
+
+    $("attemptSel").addEventListener("change", loadCodegenFiles);
+    $("sandboxFileSel").addEventListener("change", loadSandboxFile);
+
+    (async () => {
+      try {
+        await loadMeta();
+        await loadDates();
+        const d = $("dateSel").value;
+        await loadSources(d);
+        const s = $("sourceSel").value;
+        await loadAttempts(d, s);
+        await loadCodegenFiles();
+        await loadSandboxList();
+      } catch (e) {
+        $("metaNote").textContent = "Error: " + e;
+      }
+    })();
+  </script>
+</body>
+</html>
