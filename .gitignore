@@ -9,3 +9,4 @@ __pycache__/
 
 # scrape debug artifacts
 raw/debug/
+raw/links/*.jsonl

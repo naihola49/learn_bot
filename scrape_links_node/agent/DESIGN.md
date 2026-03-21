@@ -60,8 +60,6 @@ flowchart LR
 ## Token / cost notes
 
 - **Claude:** The **entire** prelude file is **not** inserted into the API prompt. Only **documentation** of the prelude API (e.g. in `GUIDELINES.md`) and strategy text in `agent_parser.py` are sent. Codegen token use grows slightly with that doc size, **not** with the full prelude line count.
-- **E2B:** Not billed per LLM token. A larger define cell may use a bit more sandbox time to load/execute; that is separate from Anthropic usage.
-
 ---
 
 _Last updated to match the prelude + two-cell E2B design._
