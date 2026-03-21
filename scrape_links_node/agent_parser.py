@@ -26,7 +26,11 @@ from agent.sandbox_scraper import (  # noqa: E402
 from agent.validation import validate_parsed_rows  # noqa: E402
 
 
-OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+# Required by Anthropic; override with ANTHROPIC_API_VERSION if they ship a newer header.
+_DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
+# Claude requires max_tokens; large enough for generated parsers + repairs.
+_DEFAULT_ANTHROPIC_MAX_TOKENS = 2048
 
 
 def load_env_from_file(path: Path) -> None:
@@ -56,11 +60,11 @@ def load_env_from_file(path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
-def resolve_openai_api_key(explicit_key: str | None) -> str:
-    """Priority: --api-key, then OPENAI_API_KEY (e.g. after load_env_from_file)."""
+def resolve_anthropic_api_key(explicit_key: str | None) -> str:
+    """Priority: --api-key, then ANTHROPIC_API_KEY (e.g. after load_env_from_file)."""
     if explicit_key and explicit_key.strip():
         return explicit_key.strip()
-    return os.getenv("OPENAI_API_KEY", "").strip()
+    return os.getenv("ANTHROPIC_API_KEY", "").strip()
 
 
 def resolve_e2b_api_key(explicit_key: str | None) -> str:
@@ -93,17 +97,19 @@ def load_module(path: Path, module_name: str):
     return module
 
 
+# Host suffix → deterministic adapter in `deterministic/`. All other hosts → unknown (Anthropic + E2B).
+_DETERMINISTIC_HOST_SUFFIXES: tuple[tuple[str, str], ...] = (
+    ("nytimes.com", "nyt"),
+    ("medium.com", "medium"),
+    ("substack.com", "substack"),
+)
+
+
 def detect_source_type(source: str) -> str:
     host = (urlparse(source).netloc or "").lower()
-    if host.endswith("nytimes.com"):
-        return "nyt"
-    if host.endswith("medium.com"):
-        return "medium"
-    if host.endswith("substack.com"):
-        return "substack"
-    # Custom-domain Substack newsletters are common and often root URL.
-    if source.endswith("/") and host not in {"medium.com", "rss.nytimes.com"}:
-        return "substack"
+    for suffix, kind in _DETERMINISTIC_HOST_SUFFIXES:
+        if host == suffix or host.endswith("." + suffix):
+            return kind
     return "unknown"
 
 
@@ -165,7 +171,7 @@ def _is_host_e2b_import_failure(exc: BaseException) -> bool:
 
 def ensure_e2b_host_dependency() -> None:
     """
-    Fail fast before OpenAI calls if this interpreter cannot import the E2B SDK.
+    Fail fast before Anthropic codegen if this interpreter cannot import the E2B SDK.
     Common mistake: shell shows (review_venv) but `python3` is still Homebrew/system.
     """
     if importlib.util.find_spec("e2b_code_interpreter") is not None:
@@ -211,31 +217,81 @@ def _library_policy_text(rich_deps: bool) -> str:
     if rich_deps:
         return (
             "Libraries: you MAY use httpx, bs4 (BeautifulSoup), lxml, and the Python standard library.\n"
-            "Prefer httpx for HTTP (timeouts, follow_redirects=True, reasonable User-Agent header).\n"
+            "A stdlib PRELUDE is still prepended (fetch_url, try_feed_at_url, collect_sitemap_page_urls, …); prefer it when enough.\n"
+            "Prefer httpx for HTTP when you need it (timeouts, follow_redirects=True, User-Agent).\n"
             "Do not pip install at runtime; only use what is already in the sandbox template.\n"
         )
     return (
-        "Libraries: use ONLY the Python standard library (urllib.request, urllib.parse, "
-        "html.parser, xml.etree.ElementTree, json, re, email.utils for dates).\n"
+        "Libraries: a trusted stdlib PRELUDE runs before your code (fetch_url, feeds, sitemap helpers). "
+        "Use those functions; do not rewrite low-level sitemap or RSS XML walking.\n"
+        "You may use the Python standard library as needed (e.g. urljoin, urlparse).\n"
         "Do not import httpx, bs4, requests, or lxml unless the host enabled --rich-sandbox-deps.\n"
     )
 
 
 def _tiered_strategy_text() -> str:
     return (
-        "Extraction strategy (try in order, stop when you have enough items):\n"
-        "1) If the input URL is already RSS/Atom XML, parse items.\n"
-        "2) GET the HTML homepage; find <link rel=\"alternate\" type=\"application/rss+xml\" or "
-        "type=\"application/atom+xml\" href=\"...\"> and fetch that feed.\n"
-        "3) Probe common feed paths on the same host: /feed, /rss.xml, /atom.xml, /feeds/all.rss.\n"
-        "4) GET /sitemap.xml; if sitemapindex, fetch nested sitemaps until you collect enough URLs.\n"
-        "5) Fallback: collect same-host http(s) links from <a href>; filter out obvious non-article paths "
-        "(tags, categories, login, static assets); prefer paths with date segments or /article/ /story/ /p/.\n"
-        "Each returned dict MUST include a non-empty absolute \"url\" (http or https).\n"
+        "Extraction strategy (use PRELUDE helpers; try in order, stop when you have enough):\n"
+        "1) try_feed_at_url(source_url) — if already a feed.\n"
+        "2) html = fetch_text(source_url); if html, discover_feed_urls_from_html(html, source_url) then try_feed_at_url on each.\n"
+        "3) For u in common_feed_candidate_urls(source_url): try_feed_at_url(u).\n"
+        "4) sm = urljoin(site_origin(source_url), 'sitemap.xml'); collect_sitemap_page_urls(sm, max_urls=max_items*20); "
+        "map to rows with item_dict(url) and trim to max_items.\n"
+        "5) If still short: reuse html from (2) or fetch_text(source_url); collect_article_link_urls(html, source_url, max_items*4); "
+        "keep article-like paths; item_dict(u) until max_items.\n"
+        "Apply strip_common_tracking_params to urls when appropriate.\n"
+        "Each returned dict MUST have non-empty absolute http(s) \"url\".\n"
     )
 
 
-def call_openai_for_parser(
+def _anthropic_text_from_response(data: dict[str, Any]) -> str:
+    """Extract assistant text from Messages API JSON (concatenate text blocks)."""
+    parts: list[str] = []
+    for block in data.get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            parts.append(str(block.get("text") or ""))
+    text = "\n".join(p for p in parts if p).strip()
+    if not text:
+        raise RuntimeError(
+            "Anthropic returned no text content in message.content. "
+            f"Raw (truncated): {json.dumps(data, ensure_ascii=True)[:800]}"
+        )
+    return text
+
+
+def _call_anthropic_messages(
+    api_key: str,
+    model: str,
+    *,
+    system: str,
+    user: str,
+    temperature: float,
+    max_tokens: int = _DEFAULT_ANTHROPIC_MAX_TOKENS,
+) -> str:
+    version = (os.getenv("ANTHROPIC_API_VERSION") or _DEFAULT_ANTHROPIC_VERSION).strip()
+    payload: dict[str, Any] = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": [{"role": "user", "content": user}],
+        "temperature": temperature,
+    }
+    req = Request(
+        ANTHROPIC_API_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": version,
+        },
+        method="POST",
+    )
+    with urlopen(req, timeout=120) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return _anthropic_text_from_response(data)
+
+
+def call_anthropic_for_parser(
     api_key: str,
     source: str,
     guidelines_text: str,
@@ -247,13 +303,15 @@ def call_openai_for_parser(
     system_prompt = (
         "You are a code generator for web source parsers.\n"
         "You MUST follow the provided GUIDELINES exactly.\n"
-        "The sandbox runs TWO cells: (1) your code defines parse_source only — no top-level calls; "
+        "The sandbox runs TWO cells: (1) a fixed stdlib PRELUDE plus your code defines parse_source only — no top-level calls; "
         "(2) the host invokes parse_source and prints JSON.\n"
+        "Use prelude helpers (fetch_url, try_feed_at_url, collect_sitemap_page_urls, etc.); do not reimplement sitemap BFS or RSS parsing.\n"
         "NEVER import e2b_code_interpreter, e2b, or any E2B SDK inside parse_source — "
-        "the host already runs the sandbox; your code only fetches/parses HTTP/HTML/XML.\n"
+        "the host already runs the sandbox; your code only orchestrates prelude + policy.\n"
         "Generated code will run in an isolated E2B cloud sandbox with internet access.\n"
-        "Return runnable Python code with all required imports.\n"
+        "Return only parse_source plus any small imports you still need (prelude needs no import).\n"
         "Do not reference undefined names.\n"
+        "Every try/except must be complete (no bare else after an incomplete try).\n"
         "If you use HTMLParser, use: from html.parser import HTMLParser\n"
         "Return only Python code defining:\n"
         "def parse_source(source_url: str, max_items: int) -> list[dict]:\n"
@@ -268,26 +326,13 @@ def call_openai_for_parser(
         f"- Respect max_items={max_items_per_source}.\n"
         f"- Return [] only if every strategy fails; prefer returning real article URLs.\n"
     )
-    payload = {
-        "model": model,
-        "temperature": 0.2,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    }
-    req = Request(
-        OPENAI_API_URL,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        method="POST",
+    return _call_anthropic_messages(
+        api_key,
+        model,
+        system=system_prompt,
+        user=user_prompt,
+        temperature=0.2,
     )
-    with urlopen(req, timeout=60) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    return data["choices"][0]["message"]["content"]
 
 
 def repair_parser_code(
@@ -306,8 +351,10 @@ def repair_parser_code(
         "Return corrected code only.\n"
         "Sandbox uses two cells: first cell defines parse_source only; second cell calls it.\n"
         "Code runs in an E2B cloud sandbox with internet access.\n"
-        "Never import e2b_code_interpreter or e2b — not available in the sandbox; use urllib/httpx only.\n"
-        "Code must be self-contained with all imports.\n"
+        "Never import e2b_code_interpreter or e2b — not available in the sandbox.\n"
+        "The prelude is still prepended; fix parse_source to use prelude helpers and valid syntax.\n"
+        "Add imports only if required by the library policy.\n"
+        "Fix any SyntaxError (complete try/except/finally; else must match if/try/for/while).\n"
         "Do not reference undefined names.\n"
         "Every successful parse must yield dicts with non-empty absolute http(s) url strings.\n"
         f"{_library_policy_text(rich_deps)}"
@@ -321,26 +368,13 @@ def repair_parser_code(
         "Fix this code and return only corrected Python code:\n"
         f"{previous_code}"
     )
-    payload = {
-        "model": model,
-        "temperature": 0.0,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    }
-    req = Request(
-        OPENAI_API_URL,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        method="POST",
+    return _call_anthropic_messages(
+        api_key,
+        model,
+        system=system_prompt,
+        user=user_prompt,
+        temperature=0.0,
     )
-    with urlopen(req, timeout=60) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    return data["choices"][0]["message"]["content"]
 
 
 def run_known_adapter(
@@ -377,11 +411,15 @@ def main() -> None:
     parser.add_argument("--sources-file", default="files.txt")
     parser.add_argument("--guidelines-file", default="GUIDELINES.md")
     parser.add_argument("--max-items-per-source", type=int, default=10)
-    parser.add_argument("--model", default="gpt-4.1-mini")
+    parser.add_argument(
+        "--model",
+        default="claude-sonnet-4-20250514",
+        help="Anthropic model id (Messages API).",
+    )
     parser.add_argument(
         "--api-key",
         default=None,
-        help="OpenAI API key (overrides env and .env.secret)",
+        help="Anthropic API key (overrides env and .env.secret)",
     )
     parser.add_argument(
         "--env-file",
@@ -413,8 +451,8 @@ def main() -> None:
     parser.add_argument(
         "--max-repair-attempts",
         type=int,
-        default=5,
-        help="Max codegen→sandbox→validate repair loops per unknown source (default: 5).",
+        default=2,
+        help="Max codegen→sandbox→validate attempts per unknown source (default: 1 = initial only; use 2+ to allow repairs).",
     )
     parser.add_argument(
         "--debug-scrape",
@@ -442,7 +480,7 @@ def main() -> None:
 
     sources = read_sources(sources_file)
     guidelines_text = guidelines_file.read_text(encoding="utf-8")
-    api_key = resolve_openai_api_key(args.api_key)
+    api_key = resolve_anthropic_api_key(args.api_key)
     e2b_key = resolve_e2b_api_key(args.e2b_api_key)
     e2b_template = (args.e2b_template or os.getenv("E2B_TEMPLATE") or "").strip() or None
     rich_deps = args.rich_sandbox_deps or os.getenv("E2B_SCRAPE_RICH_DEPS", "").lower() in (
@@ -481,8 +519,8 @@ def main() -> None:
                 continue
 
             if not api_key:
-                rows.append(failure_row(source, "gpt_generated", "OPENAI_API_KEY not set"))
-                _vlog(args.verbose, "skip: OPENAI_API_KEY not set")
+                rows.append(failure_row(source, "anthropic_api", "ANTHROPIC_API_KEY not set"))
+                _vlog(args.verbose, "skip: ANTHROPIC_API_KEY not set")
                 continue
 
             if not e2b_key:
@@ -492,8 +530,8 @@ def main() -> None:
 
             ensure_e2b_host_dependency()
 
-            _vlog(args.verbose, "unknown source: OpenAI initial codegen…")
-            code = call_openai_for_parser(
+            _vlog(args.verbose, "unknown source: Anthropic initial codegen…")
+            code = call_anthropic_for_parser(
                 api_key=api_key,
                 source=source,
                 guidelines_text=guidelines_text,
@@ -506,7 +544,7 @@ def main() -> None:
             succeeded = False
             # How we obtained `code` for this attempt (trace for humans; not model "chain of thought").
             feedback_for_code = (
-                "Initial OpenAI codegen.\n"
+                "Initial Anthropic (Claude) codegen.\n"
                 "Note: chat models do not expose private chain-of-thought; this folder is the repair loop trace.\n"
             )
             for attempt in range(max_attempts):
@@ -559,7 +597,7 @@ def main() -> None:
                         rows.append(failure_row(source, "e2b_sandbox", err))
                         succeeded = False
                         break
-                    _vlog(args.verbose, "calling OpenAI repair after E2B failure…")
+                    _vlog(args.verbose, "calling Anthropic repair after E2B failure…")
                     code = repair_parser_code(
                         api_key=api_key,
                         source=source,
@@ -571,7 +609,7 @@ def main() -> None:
                         rich_deps=rich_deps,
                     )
                     feedback_for_code = (
-                        f"OpenAI repair after E2B failure on attempt {attempt} (0-based).\n\n{err}\n"
+                        f"Anthropic repair after E2B failure on attempt {attempt} (0-based).\n\n{err}\n"
                     )
                     continue
 
@@ -601,7 +639,7 @@ def main() -> None:
                     rows.append(failure_row(source, "e2b_sandbox", vmsg[:500]))
                     succeeded = False
                     break
-                _vlog(args.verbose, "calling OpenAI repair after validation failure…")
+                _vlog(args.verbose, "calling Anthropic repair after validation failure…")
                 code = repair_parser_code(
                     api_key=api_key,
                     source=source,
@@ -613,7 +651,7 @@ def main() -> None:
                     rich_deps=rich_deps,
                 )
                 feedback_for_code = (
-                    f"OpenAI repair after validation failure on attempt {attempt} (0-based).\n\n{vmsg}\n"
+                    f"Anthropic repair after validation failure on attempt {attempt} (0-based).\n\n{vmsg}\n"
                 )
 
             if not succeeded:

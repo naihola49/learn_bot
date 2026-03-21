@@ -2,7 +2,8 @@
 Run model-generated parser code inside an E2B Code Interpreter sandbox.
 
 Flow:
-  1) First `run_code`: user code (defines `parse_source` + imports only).
+  1) First `run_code`: trusted stdlib prelude (`sandbox_prelude.py`) + model code
+     (defines `parse_source` only).
   2) Second `run_code`: host wrapper calls `parse_source` and prints JSON array.
 
 Optional: custom E2B template (deps you baked into the image, e.g. httpx + bs4).
@@ -18,6 +19,28 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+_PRELUDE_PATH = Path(__file__).resolve().with_name("sandbox_prelude.py")
+SANDBOX_PRELUDE_SOURCE = _PRELUDE_PATH.read_text(encoding="utf-8")
+compile(SANDBOX_PRELUDE_SOURCE, str(_PRELUDE_PATH), "exec")  # fail fast if prelude breaks
+
+
+def ensure_generated_code_compiles(source: str) -> None:
+    """
+    Validate syntax on the host before starting E2B (saves sandbox round-trips).
+    Surfaces the same class of errors as 'E2B define phase failed' but immediately.
+    """
+    try:
+        compile(source, "<generated_parser.py>", "exec")
+    except (SyntaxError, TabError) as e:
+        lineno = getattr(e, "lineno", None) or 0
+        offset = getattr(e, "offset", None) or 0
+        line_txt = (getattr(e, "text", None) or "").rstrip()
+        raise RuntimeError(
+            "Host syntax check: generated code is not valid Python (not sent to E2B).\n"
+            f"  {e.__class__.__name__}: {e.msg} (line {lineno}, offset {offset})\n"
+            f"  Source line: {line_txt!r}"
+        ) from e
+
 
 def normalize_generated_code(code: str) -> str:
     """Strip optional markdown fences (``` / ```python) from model output."""
@@ -32,6 +55,12 @@ def normalize_generated_code(code: str) -> str:
     if lines and lines[-1].strip().startswith("```"):
         lines = lines[:-1]
     return "\n".join(lines).strip()
+
+
+def build_sandbox_define_block(generated_code: str) -> str:
+    """Trusted prelude (stdlib) + normalized model output; executed as E2B define cell."""
+    body = normalize_generated_code(generated_code)
+    return f"{SANDBOX_PRELUDE_SOURCE}\n\n{body}\n"
 
 
 def _build_invoke_script(source_url: str, max_items: int) -> str:
@@ -155,7 +184,8 @@ def run_generated_parser_in_e2b(
             "Tip: `which python3` while your venv is activated should match the path above."
         ) from e
 
-    user_block = normalize_generated_code(code)
+    define_block = build_sandbox_define_block(code)
+    ensure_generated_code_compiles(define_block)
     invoke_block = _build_invoke_script(source_url, max_items)
 
     create_kw: dict[str, Any] = {
@@ -167,9 +197,9 @@ def run_generated_parser_in_e2b(
         create_kw["template"] = template
 
     with Sandbox.create(**create_kw) as sandbox:
-        # Step 1: define parse_source
-        ex1 = sandbox.run_code(user_block, timeout=define_timeout_sec)
-        _write_debug(debug_dir, source_url, attempt_index, "define", user_block, ex1)
+        # Step 1: prelude + parse_source
+        ex1 = sandbox.run_code(define_block, timeout=define_timeout_sec)
+        _write_debug(debug_dir, source_url, attempt_index, "define", define_block, ex1)
         if ex1.error:
             raise RuntimeError(
                 "E2B define phase failed:\n" + _execution_error_message(ex1)

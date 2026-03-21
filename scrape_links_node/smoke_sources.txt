@@ -1,3 +1,3 @@
 # Smoke: deterministic + unknown (E2B)
 https://rss.nytimes.com/services/xml/rss/nyt/Politics.xml
-https://www.nbcnews.com/politics
+https://www.whitehouse.gov/articles/

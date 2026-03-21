@@ -1,2 +1,11 @@
 # venv
 review_venv/
+
+# planning + learning module
+plan/
+.env.secret 
+
+__pycache__/
+
+# scrape debug artifacts
+raw/debug/
