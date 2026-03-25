@@ -1,6 +1,0 @@
-# Smoke: deterministic + unknown (E2B)
-https://rss.nytimes.com/services/xml/rss/nyt/Politics.xml
-https://www.notboring.co/
-https://medium.com/tag/machine-learning/recommended
-
-https://www.nbcnews.com/politics

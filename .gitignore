@@ -10,3 +10,7 @@ __pycache__/
 # scrape debug artifacts
 raw/debug/
 raw/links/*.jsonl
+
+# testing artifacts
+retrieve_content_node/testing/
+scrape_links_node/testing/
