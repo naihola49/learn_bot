@@ -7,8 +7,10 @@ Medium, NBC News, Substack-style hosts.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from newspaper import Article
@@ -101,3 +103,99 @@ def row_to_article_url(row: dict[str, Any]) -> str:
     """Prefer `url` from a links JSONL object."""
     u = row.get("url")
     return u.strip() if isinstance(u, str) else ""
+
+
+def _content_row_from_link_row(
+    link_row: dict[str, Any],
+    parsed: Newspaper3kResult,
+) -> dict[str, Any]:
+    text = parsed.text.strip()
+    return {
+        "source": str(link_row.get("source") or ""),
+        "title": parsed.title or str(link_row.get("title") or ""),
+        "url": parsed.url,
+        "guid": str(link_row.get("guid") or ""),
+        "published_at": parsed.published_at or str(link_row.get("published_at") or ""),
+        "content_text": text,
+        "word_count": len(text.split()),
+        "fetch_method": "newspaper3k",
+        "error": None,
+    }
+
+
+def build_content_rows_from_links(
+    link_rows: list[dict[str, Any]],
+    *,
+    language: str = "en",
+    request_timeout: int = 30,
+    min_text_chars: int | None = 200,
+) -> tuple[list[dict[str, Any]], int]:
+    """
+    Parse all link rows and return only successful content rows.
+
+    Success is strictly `result.error is None` (and therefore `ok=True`).
+    Returns (content_rows, failed_count).
+    """
+    out: list[dict[str, Any]] = []
+    failed = 0
+    for row in link_rows:
+        url = row_to_article_url(row)
+        parsed = extract_with_newspaper3k(
+            url,
+            language=language,
+            request_timeout=request_timeout,
+            min_text_chars=min_text_chars,
+        )
+        if parsed.error is not None:
+            failed += 1
+            continue
+        out.append(_content_row_from_link_row(row, parsed))
+    return out, failed
+
+
+def write_daily_content_jsonl_from_links_file(
+    links_jsonl_path: Path,
+    *,
+    content_dir: Path | None = None,
+    language: str = "en",
+    request_timeout: int = 30,
+    min_text_chars: int | None = 200,
+) -> tuple[Path, int, int]:
+    """
+    Build `raw/content/<run_date>.jsonl` from `raw/links/<run_date>.jsonl`.
+
+    Only writes rows where newspaper3k result has `error is None`.
+    Returns (output_path, written_rows, failed_rows).
+    """
+    if not links_jsonl_path.is_file():
+        raise FileNotFoundError(f"Links JSONL not found: {links_jsonl_path}")
+
+    run_date = links_jsonl_path.stem
+    root = links_jsonl_path.parent.parent
+    out_dir = content_dir or (root / "content")
+    out_path = out_dir / f"{run_date}.jsonl"
+
+    link_rows: list[dict[str, Any]] = []
+    for line in links_jsonl_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            link_rows.append(item)
+
+    content_rows, failed = build_content_rows_from_links(
+        link_rows,
+        language=language,
+        request_timeout=request_timeout,
+        min_text_chars=min_text_chars,
+    )
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as f:
+        for row in content_rows:
+            f.write(json.dumps(row, ensure_ascii=True) + "\n")
+    return out_path, len(content_rows), failed
