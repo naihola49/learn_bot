@@ -8,12 +8,18 @@ Medium, NBC News, Substack-style hosts.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from newspaper import Article
+
+from .extract_types import (
+    ArticleExtractResult,
+    link_row_to_content_dict,
+    load_link_rows_from_jsonl,
+    row_to_article_url,
+)
 
 
 def _dt_to_iso(dt: datetime | None) -> str | None:
@@ -22,32 +28,13 @@ def _dt_to_iso(dt: datetime | None) -> str | None:
     return dt.isoformat()
 
 
-@dataclass
-class Newspaper3kResult:
-    """Outcome of a single-URL newspaper3k fetch + parse."""
-
-    url: str
-    title: str = ""
-    text: str = ""
-    authors: list[str] = field(default_factory=list)
-    published_at: str | None = None
-    top_image: str | None = None
-    meta_lang: str | None = None
-    meta_description: str = ""
-    ok: bool = False
-    error: str | None = None
-
-    def text_len(self) -> int:
-        return len(self.text.strip())
-
-
 def extract_with_newspaper3k(
     url: str,
     *,
     language: str = "en",
     request_timeout: int = 30,
     min_text_chars: int | None = 200,
-) -> Newspaper3kResult:
+) -> ArticleExtractResult:
     """
     Download and parse one article URL.
 
@@ -57,7 +44,7 @@ def extract_with_newspaper3k(
     """
     url = (url or "").strip()
     if not url:
-        return Newspaper3kResult(url=url, ok=False, error="empty_url")
+        return ArticleExtractResult(url=url, ok=False, error="empty_url")
 
     article = Article(url, language=language)
     article.config.request_timeout = request_timeout
@@ -67,23 +54,21 @@ def extract_with_newspaper3k(
         article.download()
         article.parse()
     except Exception as exc:  # noqa: BLE001 — boundary for third-party network/HTML
-        return Newspaper3kResult(url=url, ok=False, error=f"{type(exc).__name__}: {exc}")
+        return ArticleExtractResult(url=url, ok=False, error=f"{type(exc).__name__}: {exc}")
 
     text = (article.text or "").strip()
     title = (article.title or "").strip()
     authors = [a for a in (article.authors or []) if isinstance(a, str) and a.strip()]
     published = _dt_to_iso(article.publish_date)
-    top_image = (article.top_image or "").strip() or None
     meta_lang = (article.meta_lang or "").strip() or None
     meta_desc = (article.meta_description or "").strip()
 
-    result = Newspaper3kResult(
+    result = ArticleExtractResult(
         url=url,
         title=title,
         text=text,
         authors=authors,
         published_at=published,
-        top_image=top_image,
         meta_lang=meta_lang,
         meta_description=meta_desc,
         ok=True,
@@ -97,30 +82,6 @@ def extract_with_newspaper3k(
         )
 
     return result
-
-
-def row_to_article_url(row: dict[str, Any]) -> str:
-    """Prefer `url` from a links JSONL object."""
-    u = row.get("url")
-    return u.strip() if isinstance(u, str) else ""
-
-
-def _content_row_from_link_row(
-    link_row: dict[str, Any],
-    parsed: Newspaper3kResult,
-) -> dict[str, Any]:
-    text = parsed.text.strip()
-    return {
-        "source": str(link_row.get("source") or ""),
-        "title": parsed.title or str(link_row.get("title") or ""),
-        "url": parsed.url,
-        "guid": str(link_row.get("guid") or ""),
-        "published_at": parsed.published_at or str(link_row.get("published_at") or ""),
-        "content_text": text,
-        "word_count": len(text.split()),
-        "fetch_method": "newspaper3k",
-        "error": None,
-    }
 
 
 def build_content_rows_from_links(
@@ -149,7 +110,7 @@ def build_content_rows_from_links(
         if parsed.error is not None:
             failed += 1
             continue
-        out.append(_content_row_from_link_row(row, parsed))
+        out.append(link_row_to_content_dict(row, parsed, "newspaper3k"))
     return out, failed
 
 
@@ -167,25 +128,12 @@ def write_daily_content_jsonl_from_links_file(
     Only writes rows where newspaper3k result has `error is None`.
     Returns (output_path, written_rows, failed_rows).
     """
-    if not links_jsonl_path.is_file():
-        raise FileNotFoundError(f"Links JSONL not found: {links_jsonl_path}")
-
     run_date = links_jsonl_path.stem
     root = links_jsonl_path.parent.parent
     out_dir = content_dir or (root / "content")
     out_path = out_dir / f"{run_date}.jsonl"
 
-    link_rows: list[dict[str, Any]] = []
-    for line in links_jsonl_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(item, dict):
-            link_rows.append(item)
+    link_rows = load_link_rows_from_jsonl(links_jsonl_path)
 
     content_rows, failed = build_content_rows_from_links(
         link_rows,

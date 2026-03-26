@@ -2,11 +2,11 @@
 Avoiding large token costs
 
 ## Tiers - Waterfall Strategy
-Tier 1: newspaper3k
+Tier 1: newspaper3k - Done
 - Handles NYT, most major publications out of the box
 - One line: article.download(); article.parse(); article.text
 
-Tier 2: trafilatura
+Tier 2: trafilatura - Done
 - Better than newspaper3k on paywalled/complex sites
 - Specifically built for content extraction, handles boilerplate removal
 
