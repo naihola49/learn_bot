@@ -19,11 +19,20 @@ class ArticleExtractResult:
     published_at: str | None = None
     meta_lang: str | None = None
     meta_description: str = ""
-    ok: bool = False
     error: str | None = None
 
     def text_len(self) -> int:
         return len(self.text.strip())
+
+    @property
+    def ok(self) -> bool:
+        """
+        True when extraction succeeded and yielded non-empty body text.
+
+        `error` is the single source of truth for failure reasons; callers should
+        generally treat `error is None` as "no detected failure".
+        """
+        return self.error is None and self.text_len() > 0
 
 
 def row_to_article_url(row: dict[str, Any]) -> str:

@@ -61,15 +61,15 @@ def extract_with_trafilatura(
     """
     url = (url or "").strip()
     if not url:
-        return ArticleExtractResult(url=url, ok=False, error="empty_url")
+        return ArticleExtractResult(url=url, error="empty_url")
 
     try:
         html = trafilatura.fetch_url(url)
     except Exception as exc:  # noqa: BLE001
-        return ArticleExtractResult(url=url, ok=False, error=f"{type(exc).__name__}: {exc}")
+        return ArticleExtractResult(url=url, error=f"{type(exc).__name__}: {exc}")
 
     if not html:
-        return ArticleExtractResult(url=url, ok=False, error="fetch_failed")
+        return ArticleExtractResult(url=url, error="fetch_failed")
 
     try:
         try:
@@ -88,10 +88,10 @@ def extract_with_trafilatura(
                 include_comments=False,
             )
     except Exception as exc:  # noqa: BLE001
-        return ArticleExtractResult(url=url, ok=False, error=f"{type(exc).__name__}: {exc}")
+        return ArticleExtractResult(url=url, error=f"{type(exc).__name__}: {exc}")
 
     if doc is None:
-        return ArticleExtractResult(url=url, ok=False, error="bare_extraction_empty")
+        return ArticleExtractResult(url=url, error="bare_extraction_empty")
 
     text = (getattr(doc, "text", None) or "").strip()
     title = (getattr(doc, "title", None) or "").strip()
@@ -108,12 +108,10 @@ def extract_with_trafilatura(
         published_at=published,
         meta_lang=meta_lang,
         meta_description=meta_desc,
-        ok=True,
         error=None,
     )
 
     if min_text_chars is not None and result.text_len() < min_text_chars:
-        result.ok = False
         result.error = (
             f"body_too_short: {result.text_len()} chars (min {min_text_chars})"
         )

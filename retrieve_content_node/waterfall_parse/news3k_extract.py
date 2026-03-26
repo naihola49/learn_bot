@@ -44,7 +44,7 @@ def extract_with_newspaper3k(
     """
     url = (url or "").strip()
     if not url:
-        return ArticleExtractResult(url=url, ok=False, error="empty_url")
+        return ArticleExtractResult(url=url, error="empty_url")
 
     article = Article(url, language=language)
     article.config.request_timeout = request_timeout
@@ -54,7 +54,7 @@ def extract_with_newspaper3k(
         article.download()
         article.parse()
     except Exception as exc:  # noqa: BLE001 — boundary for third-party network/HTML
-        return ArticleExtractResult(url=url, ok=False, error=f"{type(exc).__name__}: {exc}")
+        return ArticleExtractResult(url=url, error=f"{type(exc).__name__}: {exc}")
 
     text = (article.text or "").strip()
     title = (article.title or "").strip()
@@ -71,12 +71,10 @@ def extract_with_newspaper3k(
         published_at=published,
         meta_lang=meta_lang,
         meta_description=meta_desc,
-        ok=True,
         error=None,
     )
 
     if min_text_chars is not None and result.text_len() < min_text_chars:
-        result.ok = False
         result.error = (
             f"body_too_short: {result.text_len()} chars (min {min_text_chars})"
         )
